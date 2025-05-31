@@ -120,8 +120,10 @@ def auto_rotate(image):
     angles = []
     for rho, theta in lines[:, 0]:
         angle = (theta * 180 / np.pi) - 90
-        if -45 <= angle <= 45:  # Horizontal-ish
-            angles.append(angle)
+        angles.append(angle)
+
+    # Filter for mostly horizontal/vertical lines
+    angles = [a for a in angles if -60 <= a <= 60 or abs(a) >= 85]
 
     if len(angles) < 5:
         return image  # Not enough lines to trust the angle
@@ -129,14 +131,8 @@ def auto_rotate(image):
     median_angle = np.median(angles)
 
     # Snap to nearest 90°
-    if -45 <= median_angle < -22.5:
-        snapped_angle = -90
-    elif -22.5 <= median_angle < 22.5:
-        snapped_angle = 0
-    elif 22.5 <= median_angle < 67.5:
-        snapped_angle = 90
-    else:
-        snapped_angle = 0  # Fallback
+    snapped_angle = round(median_angle / 90) * 90
+    snapped_angle = snapped_angle % 360  # Normalize
 
     if snapped_angle == 0:
         return image  # Already properly oriented
@@ -164,10 +160,12 @@ def ensure_orientation(image, mode="landscape"):
     if mode == "auto":
         mode = detect_content_orientation(image)
 
-    if mode == "landscape" and h > w:
+    is_landscape = w >= h
+    should_be_landscape = (mode == "landscape")
+
+    if is_landscape != should_be_landscape:
+        # Rotate to match desired orientation
         return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-    elif mode == "portrait" and w > h:
-        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
     return image
 
 def apply_final_crop(image, region: CropRegion):
@@ -245,30 +243,55 @@ def find_contours(image):
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return contours
 
-def warp_from_contour(image, contour):
+def warp_from_contour(image, contour, min_area=10000):
+    """
+    Extracts and straightens a region from the input image based on the given contour.
+    """
     area = cv2.contourArea(contour)
-    if area < 10000:  # Skip small artifacts
+    if area < min_area:
         return None
 
     rect = cv2.minAreaRect(contour)
-    box = cv2.boxPoints(rect)
-    box = np.intp(box)
+    width, height = map(int, rect[1])
 
-    width = int(rect[1][0])
-    height = int(rect[1][1])
+    # Sanity check
     if width == 0 or height == 0:
         return None
 
-    src_pts = box.astype("float32")
+    box = cv2.boxPoints(rect)
+    box = np.array(sorted(box, key=lambda p: p[1]), dtype="float32")  # sort by Y
+
+    # Determine top-left, top-right, bottom-right, bottom-left
+    if box[0][0] < box[1][0]:
+        top_left, top_right = box[0], box[1]
+    else:
+        top_left, top_right = box[1], box[0]
+
+    if box[2][0] < box[3][0]:
+        bottom_left, bottom_right = box[2], box[3]
+    else:
+        bottom_left, bottom_right = box[3], box[2]
+
+    src_pts = np.array([top_left, top_right, bottom_right, bottom_left], dtype="float32")
     dst_pts = np.array([
-        [0, height - 1],
         [0, 0],
         [width - 1, 0],
-        [width - 1, height - 1]
+        [width - 1, height - 1],
+        [0, height - 1]
     ], dtype="float32")
+
+    # Handle potential width/height swap if rotated
+    if width < height:
+        dst_pts = np.array([
+            [0, height - 1],
+            [0, 0],
+            [width - 1, 0],
+            [width - 1, height - 1]
+        ], dtype="float32")
 
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
     warped = cv2.warpPerspective(image, M, (width, height))
+
     return warped
 
 def detect_and_straighten(image_path, output_dir, orientation, final_crop, resize_to, debug):
@@ -287,8 +310,9 @@ def detect_and_straighten(image_path, output_dir, orientation, final_crop, resiz
         if warped is None:
             continue
 
-        rotated = auto_rotate(warped)
-        rotated = ensure_orientation(rotated, orientation)
+        rotated = warped
+        #rotated = auto_rotate(warped)
+        #rotated = ensure_orientation(rotated, orientation)
 
         if final_crop:
             rotated = apply_final_crop(rotated, final_crop)
