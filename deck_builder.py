@@ -243,54 +243,76 @@ def find_contours(image):
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return contours
 
+def order_points(pts):
+    # Order: top-left, top-right, bottom-right, bottom-left
+    rect = np.zeros((4, 2), dtype="float32")
+
+    # Sum and diff to sort
+    s = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1)
+
+    rect[0] = pts[np.argmin(s)]        # top-left
+    rect[2] = pts[np.argmax(s)]        # bottom-right
+    rect[1] = pts[np.argmin(diff)]     # top-right
+    rect[3] = pts[np.argmax(diff)]     # bottom-left
+
+    return rect
+
 def warp_from_contour(image, contour, min_area=10000):
     """
-    Extracts and straightens a region from the input image based on the given contour.
+    Warps the image based on the contour and ensures orientation is either landscape or portrait,
+    based on which dimension is larger.
     """
     area = cv2.contourArea(contour)
     if area < min_area:
         return None
 
     rect = cv2.minAreaRect(contour)
-    width, height = map(int, rect[1])
+    print(rect)
+    width, height = rect[1]
+
+    print(f"Original: {width},{height}")
 
     # Sanity check
     if width == 0 or height == 0:
         return None
 
     box = cv2.boxPoints(rect)
-    box = np.array(sorted(box, key=lambda p: p[1]), dtype="float32")  # sort by Y
+    box = np.array(box, dtype="float32")
+    print(box)
 
-    # Determine top-left, top-right, bottom-right, bottom-left
-    if box[0][0] < box[1][0]:
-        top_left, top_right = box[0], box[1]
-    else:
-        top_left, top_right = box[1], box[0]
+    # Determine if the detected rectangle is closer to portrait or landscape
+    is_landscape = width >= height
 
-    if box[2][0] < box[3][0]:
-        bottom_left, bottom_right = box[2], box[3]
-    else:
-        bottom_left, bottom_right = box[3], box[2]
+    # Define destination size with corrected orientation
+    target_width = int(max(width, height))
+    target_height = int(min(width, height))
 
-    src_pts = np.array([top_left, top_right, bottom_right, bottom_left], dtype="float32")
+    if not is_landscape:
+        target_width, target_height = target_height, target_width  # swap for portrait
+
+    print(f"Target: {target_width},{target_height}")
     dst_pts = np.array([
         [0, 0],
-        [width - 1, 0],
-        [width - 1, height - 1],
-        [0, height - 1]
+        [target_width - 1, 0],
+        [target_width - 1, target_height - 1],
+        [0, target_height - 1]
     ], dtype="float32")
 
-    # Handle potential width/height swap if rotated
-    if width < height:
+    # Order the source box points to match destination layout
+    src_pts = order_points(box)
+
+    # If the original rectangle is closer to portrait, rotate destination to match
+    if not is_landscape:
         dst_pts = np.array([
-            [0, height - 1],
+            [0, target_height - 1],
             [0, 0],
-            [width - 1, 0],
-            [width - 1, height - 1]
+            [target_width - 1, 0],
+            [target_width - 1, target_height - 1]
         ], dtype="float32")
 
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    warped = cv2.warpPerspective(image, M, (width, height))
+    warped = cv2.warpPerspective(image, M, (target_width, target_height))
 
     return warped
 
