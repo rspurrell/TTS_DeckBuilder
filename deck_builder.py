@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import sys
 import os
 import re
 import argparse
@@ -21,7 +22,7 @@ class ResizeTarget:
     gamma: float = 2.2
 
 class DebugViewer:
-    def __init__(self, max_width=1000, max_height=800):
+    def __init__(self, max_width=800, max_height=800):
         self.zoom_scale = 1.0
         self.fit_mode = True
         self.max_width = max_width
@@ -31,16 +32,18 @@ class DebugViewer:
         self.original = image
         display = self.get_display_image()
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        h, w = display.shape[:2]
+        cv2.resizeWindow(window_name, w, h)
         cv2.imshow(window_name, display)
 
     def get_display_image(self):
+        h, w = self.original.shape[:2]
         if self.fit_mode:
-            h, w = self.original.shape[:2]
             scale = min(self.max_width / w, self.max_height / h, 1.0)
         else:
             scale = self.zoom_scale
-        new_w = max(1, int(self.original.shape[1] * scale))
-        new_h = max(1, int(self.original.shape[0] * scale))
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
         return cv2.resize(self.original, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     def handle_key(self, key):
@@ -63,24 +66,19 @@ def show_debug_images(original, contours, cropped, viewer_orig, viewer_crop):
         rect = cv2.minAreaRect(cnt)
         box = cv2.boxPoints(rect)
         box = np.intp(box)
-        cv2.drawContours(debug_img, [box], 0, (0, 255, 0), 2)
+        cv2.drawContours(debug_img, [box], 0, (255, 0, 0), 5) # (BGR) 5px blue line
 
     viewer_orig.show("Detected Regions", debug_img)
     viewer_crop.show("Cropped/Rotated", cropped)
 
-def resize_for_display(image, max_width=1000, max_height=800):
-    h, w = image.shape[:2]
-    scale = min(max_width / w, max_height / h, 1.0)  # Only downscale
-    return cv2.resize(image, (int(w * scale), int(h * scale)))
-
 def run_debug_viewers(original, cropped, count, contour):
     should_save = False
     viewer_orig = DebugViewer()
-    viewer_crop = DebugViewer()
+    viewer_crop = DebugViewer(400, 400)
     while True:
+        print(f"Detected area: {cv2.contourArea(contour)}px")
         show_debug_images(original, [contour], cropped, viewer_orig, viewer_crop)
         key = cv2.waitKey(0)
-
         if key in [13, ord('\r')]:  # Enter key
             should_save = True
             break
@@ -94,7 +92,7 @@ def run_debug_viewers(original, cropped, count, contour):
     return should_save
 #endregion
 
-#region separate and straighten functions
+#region detect and straighten functions
 def get_next_output_index(output_dir, prefix="output_", ext=".png"):
     """
     Scans the output directory and returns the next available index for saving images.
@@ -109,63 +107,15 @@ def get_next_output_index(output_dir, prefix="output_", ext=".png"):
                 max_index = index
     return max_index + 1  # Next available number
 
-def auto_rotate(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-
-    lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=150)
-    if lines is None:
-        return image  # No lines found
-
-    angles = []
-    for rho, theta in lines[:, 0]:
-        angle = (theta * 180 / np.pi) - 90
-        angles.append(angle)
-
-    # Filter for mostly horizontal/vertical lines
-    angles = [a for a in angles if -60 <= a <= 60 or abs(a) >= 85]
-
-    if len(angles) < 5:
-        return image  # Not enough lines to trust the angle
-
-    median_angle = np.median(angles)
-
-    # Snap to nearest 90°
-    snapped_angle = round(median_angle / 90) * 90
-    snapped_angle = snapped_angle % 360  # Normalize
-
-    if snapped_angle == 0:
-        return image  # Already properly oriented
-
-    # Rotate image
-    (h, w) = image.shape[:2]
-    M = cv2.getRotationMatrix2D((w // 2, h // 2), snapped_angle, 1.0)
-    rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-
-    return rotated
-
-def detect_content_orientation(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)  # horizontal edges
-    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)  # vertical edges
-
-    sum_x = np.sum(np.abs(sobel_x))
-    sum_y = np.sum(np.abs(sobel_y))
-
-    return "landscape" if sum_x >= sum_y else "portrait"
-
-def ensure_orientation(image, mode="landscape"):
-    h, w = image.shape[:2]
-
+def ensure_orientation(image, mode="auto"):
     if mode == "auto":
-        mode = detect_content_orientation(image)
+        return image
 
-    is_landscape = w >= h
-    should_be_landscape = (mode == "landscape")
-
-    if is_landscape != should_be_landscape:
-        # Rotate to match desired orientation
+    h, w = image.shape[:2]
+    if mode == "landscape" and h > w:
         return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    elif mode == "portrait" and w > h:
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
     return image
 
 def apply_final_crop(image, region: CropRegion):
@@ -214,7 +164,7 @@ def resize_with_gamma(image, target: ResizeTarget):
 
     return corrected_bgr
 
-def find_contours(image):
+def find_contours(image, block_size=25, adaptive_threshold=15):
     """
     Preprocess the input image and return a list of contours that are likely
     to represent individual regions (e.g. photos on a scanned page).
@@ -226,13 +176,11 @@ def find_contours(image):
         List of 4-point approximated contours
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    #blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    #edged = cv2.Canny(blur, 50, 200)
 
     # Better thresholding
     thresh = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 25, 15
+        cv2.THRESH_BINARY_INV, block_size, adaptive_threshold
     )
 
     # Improve contour edge detection
@@ -262,78 +210,51 @@ def warp_from_contour(image, contour, min_area=10000):
     based on which dimension is larger.
     """
     area = cv2.contourArea(contour)
-    if area < min_area:
+    if area < min_area: # Skip small artifacts
         return None
 
     rect = cv2.minAreaRect(contour)
-    print(rect)
-    box = cv2.boxPoints(rect)
-    box = order_points(np.array(box, dtype="float32"))
-    print(box)
+    src_pts = cv2.boxPoints(rect)
+    src_pts = order_points(np.array(src_pts, dtype="float32"))
 
     # Compute width and height based on distances between points
-    (tl, tr, br, bl) = box
+    (tl, tr, br, bl) = src_pts
 
-    edge_b = np.linalg.norm(br - bl)   # bottom edge
-    edge_t = np.linalg.norm(tr - tl)   # top edge
+    edge_b = np.linalg.norm(br - bl)  # bottom edge
+    edge_t = np.linalg.norm(tr - tl)  # top edge
     edge_r = np.linalg.norm(tr - br)  # right edge
     edge_l = np.linalg.norm(tl - bl)  # left edge
 
     max_horizontal = int(max(edge_b, edge_t))
     max_vertical = int(max(edge_r, edge_l))
 
-    # Determine orientation based on image-space box points
-    is_landscape = max_horizontal >= max_vertical
+    # Set destination points for upright output
+    dst_pts = np.array([
+        [0, 0],
+        [max_horizontal - 1, 0],
+        [max_horizontal - 1, max_vertical - 1],
+        [0, max_vertical - 1]
+    ], dtype="float32")
 
-    print(f"Target: {max_horizontal},{max_vertical}")
-
-    # Set destination points
-    if is_landscape:
-        dst_pts = np.array([
-            [0, 0],
-            [max_horizontal - 1, 0],
-            [max_horizontal - 1, max_vertical - 1],
-            [0, max_vertical - 1]
-        ], dtype="float32")
-        print("landscape")
-    else:
-        # For portrait, rotate destination box
-        dst_pts = np.array([
-            # [0, max_vertical - 1],
-            # [0, 0],
-            # [max_horizontal - 1, 0],
-            # [max_horizontal - 1, max_vertical - 1]
-            [0, 0],
-            [max_horizontal - 1, 0],
-            [max_horizontal - 1, max_vertical - 1],
-            [0, max_vertical - 1]
-        ], dtype="float32")
-        print("portrait")
-
-    M = cv2.getPerspectiveTransform(box, dst_pts)
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
     warped = cv2.warpPerspective(image, M, (max_horizontal, max_vertical))
-
     return warped
 
-def detect_and_straighten(image_path, output_dir, orientation, final_crop, resize_to, debug):
+def detect_and_straighten(image_path, output_dir, block_size, threshold, min_area, orientation, final_crop, resize_to, debug):
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Cannot load image: {image_path}")
 
-    contours = find_contours(img)
+    contours = find_contours(img, block_size, threshold)
 
-    regionCount = 0
-    skipped_count = 0
-    saved_count = 0
+    regionCount = saved_count = skipped_count = 0
     start_index = get_next_output_index(output_dir)
     for cnt in contours:
-        warped = warp_from_contour(img, cnt)
+        warped = warp_from_contour(img, cnt, min_area)
         if warped is None:
             continue
 
-        rotated = warped
-        #rotated = auto_rotate(warped)
-        #rotated = ensure_orientation(rotated, orientation)
+        rotated = ensure_orientation(warped, orientation)
 
         if final_crop:
             rotated = apply_final_crop(rotated, final_crop)
@@ -435,9 +356,22 @@ def parse_grid(grid_str):
 
 if __name__ == "__main__":
     # define arguments
+    is_grid_defined = '--grid' in sys.argv
+
     parser = argparse.ArgumentParser(description="Detect and straighten multiple images from a scanned photo.")
-    parser.add_argument("input", help="Path to input scanned image")
+    parser.add_argument("--source", required=not is_grid_defined,
+        help="Path to source image"
+    )
     parser.add_argument("output", help="Directory to save results")
+    parser.add_argument("--min-area", type=int, default=10000,
+        help="Minimum area (in pixels) for a detected contour to be considered valid (avoids artifacts)."
+    )
+    parser.add_argument("--adaptive-block-size", type=int, default=25,
+        help="Block size for adaptive thresholding (must be odd and > 1)"
+    )
+    parser.add_argument( "--adaptive-threshold", type=int, default=15,
+        help="Adjusts adaptive threshold sensitivity. Higher values make the detected image cleaner (reduces noise), but might lose fine detail. Lower values can preserve smaller or faint objects, but may introduce noise or false contours."
+    )
     parser.add_argument("--orientation", choices=["landscape", "portrait", "auto"], default="auto",
         help="Preferred orientation: landscape, portrait, or auto (content-based)"
     )
@@ -449,13 +383,16 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=2.2,
         help="Gamma correction value for resizing (0 to disable, default=2.2). Only appied when --resize-to option is specified."
     )
-    parser.add_argument("--grid",
-        help="Combine all output images into a single image grid with format COLSxROWS (e.g. 6x3)"
+    parser.add_argument("--grid", required=is_grid_defined,
+        help="Combine all output images into a single image grid with format COLSxROWS (e.g. 6x3). Not compatible with any option other than output."
     )
-    parser.add_argument("--debug", action="store_true", help="Show debug previews and allow image confirmation")
+    parser.add_argument("--debug", action="store_true", help="Show debug previews and allow image confirmation. Enter to save. +/-/z to zoom.")
 
     # parse arguments
     args = parser.parse_args()
+
+    if args.adaptive_block_size and (args.adaptive_block_size & 1 == 0 or args.adaptive_block_size <= 1):
+        raise ValueError("Block size for adaptive thresholding must be odd and > 1")
 
     # normalize arguments
     if args.final_crop:
@@ -471,10 +408,13 @@ if __name__ == "__main__":
         os.makedirs(args.output)
 
     # determine execution
-    if args.grid:
+    if args.source:
+        detect_and_straighten(args.source, args.output,
+            args.adaptive_block_size, args.adaptive_threshold, args.min_area,
+            args.orientation, args.final_crop, args.resize_to, args.debug
+        )
+    elif args.grid:
         create_image_grid(args.output, args.grid)
-    else:
-        detect_and_straighten(args.input, args.output, args.orientation, args.final_crop, args.resize_to, args.debug)
 
     if args.debug:
         cv2.destroyAllWindows()
