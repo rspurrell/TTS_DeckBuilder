@@ -244,17 +244,15 @@ def find_contours(image):
     return contours
 
 def order_points(pts):
-    # Order: top-left, top-right, bottom-right, bottom-left
+    # Order points: top-left, top-right, bottom-right, bottom-left
     rect = np.zeros((4, 2), dtype="float32")
-
-    # Sum and diff to sort
     s = pts.sum(axis=1)
     diff = np.diff(pts, axis=1)
 
-    rect[0] = pts[np.argmin(s)]        # top-left
-    rect[2] = pts[np.argmax(s)]        # bottom-right
-    rect[1] = pts[np.argmin(diff)]     # top-right
-    rect[3] = pts[np.argmax(diff)]     # bottom-left
+    rect[0] = pts[np.argmin(s)]     # top-left
+    rect[2] = pts[np.argmax(s)]     # bottom-right
+    rect[1] = pts[np.argmin(diff)]  # top-right
+    rect[3] = pts[np.argmax(diff)]  # bottom-left
 
     return rect
 
@@ -269,50 +267,51 @@ def warp_from_contour(image, contour, min_area=10000):
 
     rect = cv2.minAreaRect(contour)
     print(rect)
-    width, height = rect[1]
-
-    print(f"Original: {width},{height}")
-
-    # Sanity check
-    if width == 0 or height == 0:
-        return None
-
     box = cv2.boxPoints(rect)
-    box = np.array(box, dtype="float32")
+    box = order_points(np.array(box, dtype="float32"))
     print(box)
 
-    # Determine if the detected rectangle is closer to portrait or landscape
-    is_landscape = width >= height
+    # Compute width and height based on distances between points
+    (tl, tr, br, bl) = box
 
-    # Define destination size with corrected orientation
-    target_width = int(max(width, height))
-    target_height = int(min(width, height))
+    edge_b = np.linalg.norm(br - bl)   # bottom edge
+    edge_t = np.linalg.norm(tr - tl)   # top edge
+    edge_r = np.linalg.norm(tr - br)  # right edge
+    edge_l = np.linalg.norm(tl - bl)  # left edge
 
-    if not is_landscape:
-        target_width, target_height = target_height, target_width  # swap for portrait
+    max_horizontal = int(max(edge_b, edge_t))
+    max_vertical = int(max(edge_r, edge_l))
 
-    print(f"Target: {target_width},{target_height}")
-    dst_pts = np.array([
-        [0, 0],
-        [target_width - 1, 0],
-        [target_width - 1, target_height - 1],
-        [0, target_height - 1]
-    ], dtype="float32")
+    # Determine orientation based on image-space box points
+    is_landscape = max_horizontal >= max_vertical
 
-    # Order the source box points to match destination layout
-    src_pts = order_points(box)
+    print(f"Target: {max_horizontal},{max_vertical}")
 
-    # If the original rectangle is closer to portrait, rotate destination to match
-    if not is_landscape:
+    # Set destination points
+    if is_landscape:
         dst_pts = np.array([
-            [0, target_height - 1],
             [0, 0],
-            [target_width - 1, 0],
-            [target_width - 1, target_height - 1]
+            [max_horizontal - 1, 0],
+            [max_horizontal - 1, max_vertical - 1],
+            [0, max_vertical - 1]
         ], dtype="float32")
+        print("landscape")
+    else:
+        # For portrait, rotate destination box
+        dst_pts = np.array([
+            # [0, max_vertical - 1],
+            # [0, 0],
+            # [max_horizontal - 1, 0],
+            # [max_horizontal - 1, max_vertical - 1]
+            [0, 0],
+            [max_horizontal - 1, 0],
+            [max_horizontal - 1, max_vertical - 1],
+            [0, max_vertical - 1]
+        ], dtype="float32")
+        print("portrait")
 
-    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    warped = cv2.warpPerspective(image, M, (target_width, target_height))
+    M = cv2.getPerspectiveTransform(box, dst_pts)
+    warped = cv2.warpPerspective(image, M, (max_horizontal, max_vertical))
 
     return warped
 
