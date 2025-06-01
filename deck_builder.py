@@ -283,13 +283,13 @@ def detect_and_straighten(image_path, output_dir, block_size, threshold, min_are
             print(f"{skipped_count} images skipped.")
 #endregion
 
-def create_image_grid(output_dir, grid_size, output_filename="combined_grid.jpg"):
+def create_image_grid(source_dir, output_dir, grid_size, output_filename="combined_grid.jpg"):
     cols, rows = grid_size
     pattern = re.compile(r"output_(\d+)\.(jpg|png)$")
 
     # Get and sort output images
     files = sorted([
-        f for f in os.listdir(output_dir)
+        f for f in os.listdir(source_dir)
         if pattern.match(f)
     ])
 
@@ -297,7 +297,7 @@ def create_image_grid(output_dir, grid_size, output_filename="combined_grid.jpg"
         print("No images found for grid.")
         return
 
-    images = [cv2.imread(os.path.join(output_dir, f)) for f in files]
+    images = [cv2.imread(os.path.join(source_dir, f)) for f in files]
     if not all(img is not None for img in images):
         raise ValueError("Failed to load one or more images for grid.")
 
@@ -356,12 +356,8 @@ def parse_grid(grid_str):
 
 if __name__ == "__main__":
     # define arguments
-    is_grid_defined = '--grid' in sys.argv
-
     parser = argparse.ArgumentParser(description="Detect and straighten multiple images from a scanned photo.")
-    parser.add_argument("--source", required=not is_grid_defined,
-        help="Path to source image"
-    )
+    parser.add_argument("source", help="Path to source image")
     parser.add_argument("output", help="Directory to save results")
     parser.add_argument("--min-area", type=int, default=10000,
         help="Minimum area (in pixels) for a detected contour to be considered valid (avoids artifacts)."
@@ -383,7 +379,7 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=2.2,
         help="Gamma correction value for resizing (0 to disable, default=2.2). Only appied when --resize-to option is specified."
     )
-    parser.add_argument("--grid", required=is_grid_defined,
+    parser.add_argument("--grid",
         help="Combine all output images into a single image grid with format COLSxROWS (e.g. 6x3). Not compatible with any option other than output."
     )
     parser.add_argument("--debug", action="store_true", help="Show debug previews and allow image confirmation. Enter to save. +/-/z to zoom.")
@@ -408,13 +404,13 @@ if __name__ == "__main__":
         os.makedirs(args.output)
 
     # determine execution
-    if args.source:
+    if args.grid:
+        create_image_grid(args.source, args.output, args.grid)
+    else:
         detect_and_straighten(args.source, args.output,
             args.adaptive_block_size, args.adaptive_threshold, args.min_area,
             args.orientation, args.final_crop, args.resize_to, args.debug
         )
-    elif args.grid:
-        create_image_grid(args.output, args.grid)
 
     if args.debug:
         cv2.destroyAllWindows()
